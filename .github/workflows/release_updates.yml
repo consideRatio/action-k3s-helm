@@ -1,0 +1,29 @@
+# The purpose of this workflow is to automatically trigger on a GitHub release
+# being created, to make sure we have a vX branch updated alongside the
+# vX.Y.Z release we made.
+#
+# To cut a new release, create one using the GitHub UI at
+# https://github.com/jupyterhub/action-k3s-helm/releases where you also create
+# an associated tag as part of the release.
+#
+# Name the release and tag vX.Y.Z.
+#
+name: Release updates
+
+on:
+  release:
+    types: [published, edited]
+
+jobs:
+  actions-tagger:
+    runs-on: windows-latest
+    steps:
+      # Action reference: https://github.com/Actions-R-Us/actions-tagger
+      - uses: Actions-R-Us/actions-tagger@latest
+        env:
+          GITHUB_TOKEN: "${{ github.token }}"
+        with:
+          # By using branches as identifiers it is still possible to backtrack
+          # some patch, but not if we use tags.
+          prefer_branch_releases: true
+          publish_latest_tag: true
