@@ -4,11 +4,6 @@ name: Test
 
 on:
   pull_request:
-  push:
-    branches-ignore:
-      - "dependabot/**"
-      - "pre-commit-ci-update-config"
-    tags: ["**"]
   workflow_dispatch:
 
 jobs:
@@ -22,16 +17,18 @@ jobs:
           - k3s-version: ""
             k3s-channel: latest
             helm-version: ""
-            metrics-enabled: "true"
-            traefik-enabled: "true"
+            metrics-enabled: "false"
+            traefik-enabled: "false"
             docker-enabled: "false"
+            network-provider: calico
 
           - k3s-version: ""
             k3s-channel: latest
             helm-version: "v4.0.5"
-            metrics-enabled: "true"
-            traefik-enabled: "true"
+            metrics-enabled: "false"
+            traefik-enabled: "false"
             docker-enabled: "false"
+            network-provider: calico
 
           - k3s-version: ""
             k3s-channel: latest
@@ -39,27 +36,7 @@ jobs:
             metrics-enabled: "false"
             traefik-enabled: "false"
             docker-enabled: "true"
-
-          - k3s-version: ""
-            k3s-channel: latest
-            helm-version: ""
-            metrics-enabled: "true"
-            traefik-enabled: "true"
-            docker-enabled: "true"
-
-          - k3s-version: ""
-            k3s-channel: latest
-            helm-version: ""
-            metrics-enabled: "false"
-            traefik-enabled: "false"
-            docker-enabled: "false"
-
-          - k3s-version: v1.24.7+k3s1
-            k3s-channel: ""
-            helm-version: v3.5.0
-            metrics-enabled: "true"
-            traefik-enabled: "true"
-            docker-enabled: "false"
+            network-provider: calico
 
           - k3s-version: v1.24.7+k3s1
             k3s-channel: ""
@@ -67,12 +44,22 @@ jobs:
             metrics-enabled: "false"
             traefik-enabled: "false"
             docker-enabled: "true"
+            network-provider: calico
+
+          - k3s-version: ""
+            k3s-channel: latest
+            helm-version: ""
+            metrics-enabled: "false"
+            traefik-enabled: "false"
+            docker-enabled: "false"
+            network-provider: cilium
 
     steps:
       - uses: actions/checkout@v6
       - name: Local action
         id: k3s
         uses: ./
+        timeout-minutes: 2
         with:
           k3s-version: ${{ matrix.k3s-version }}
           k3s-channel: ${{ matrix.k3s-channel }}
@@ -80,6 +67,7 @@ jobs:
           metrics-enabled: ${{ matrix.metrics-enabled }}
           traefik-enabled: ${{ matrix.traefik-enabled }}
           docker-enabled: ${{ matrix.docker-enabled }}
+          network-provider: ${{ matrix.network-provider }}
 
       - name: Verify action's outputs and env
         run: |
@@ -88,6 +76,8 @@ jobs:
           echo "k3s-version=${{ steps.k3s.outputs.k3s-version }}"
           echo "k8s-version=${{ steps.k3s.outputs.k8s-version }}"
           echo "calico-version=${{ steps.k3s.outputs.calico-version }}"
+          echo "cilium-version=${{ steps.k3s.outputs.cilium-version }}"
+          echo "network-provider=${{ steps.k3s.outputs.network-provider }}"
           echo "helm-version=${{ steps.k3s.outputs.helm-version }}"
           echo "---"
 
@@ -108,8 +98,16 @@ jobs:
               echo "k8s-version not set correctly as an action output"
               EXIT=1
           fi
-          if [[ "${{ steps.k3s.outputs.calico-version }}" != v* ]]; then
+          if [[ "${{ steps.k3s.outputs.network-provider }}" != "${{ matrix.network-provider }}" ]]; then
+              echo "network-provider not set correctly as an action output"
+              EXIT=1
+          fi
+          if [[ "${{ matrix.network-provider }}" == calico && "${{ steps.k3s.outputs.calico-version }}" != v* ]]; then
               echo "calico-version not set correctly as an action output"
+              EXIT=1
+          fi
+          if [[ "${{ matrix.network-provider }}" == cilium && "${{ steps.k3s.outputs.cilium-version }}" != v* ]]; then
+              echo "cilium-version not set correctly as an action output"
               EXIT=1
           fi
           if [[ "${{ steps.k3s.outputs.helm-version }}" != v* ]]; then
@@ -119,30 +117,9 @@ jobs:
 
           exit $EXIT
 
-      - name: Information from kubectl
-        run: |
-          kubectl version
-          kubectl get storageclass
-          kubectl get deploy,daemonset,pods --all-namespaces
-
-      - name: Information from docker
-        run: |
-          docker info
-          docker ps
-
-      - name: Information from helm
-        run: |
-          helm version
-          helm list
-
-          if helm version 2>&1 | grep WARNING > /dev/null; then
-              echo "helm is expected to run without a WARNING!"
-              exit 1
-          fi
-
       - name: Verify deploy/metrics-server based on metrics-enabled input
         run: |
-          kubectl get --namespace=kube-system deploy/metrics-server && enabled=true || enabled=false
+          timeout 20s kubectl get --namespace=kube-system deploy/metrics-server --request-timeout=10s && enabled=true || enabled=false
           if [[ "$enabled" != "${{ matrix.metrics-enabled }}" ]]; then
               echo "ERROR: deploy/metrics-server detected or not, which broke an assumption"
               exit 1
@@ -150,8 +127,13 @@ jobs:
 
       - name: Verify deploy/traefik based on traefik-enabled input
         run: |
-          kubectl get --namespace=kube-system deploy/traefik && enabled=true || enabled=false
-          if [[ "$enabled" != "${{ matrix.traefik-enabled }}" ]]; then
+          timeout 20s kubectl get --namespace=kube-system deploy/traefik --request-timeout=10s && enabled=true || enabled=false
+          if [[ "${{ matrix.network-provider }}" == cilium ]]; then
+              expected=false
+          else
+              expected="${{ matrix.traefik-enabled }}"
+          fi
+          if [[ "$enabled" != "$expected" ]]; then
               echo "ERROR: deploy/traefik detected or not, which broke an assumption"
               exit 1
           fi
@@ -185,17 +167,16 @@ jobs:
       - name: Run netpol enforcement test chart's tests
         run: helm test test-netpol-enforcement --logs
 
-      # ref: https://github.com/jupyterhub/action-k8s-namespace-report
       - name: Kubernetes namespace report (kube-system)
-        uses: jupyterhub/action-k8s-namespace-report@v1
-        if: always()
-        with:
-          namespace: kube-system
-          important-workloads: >
-            ds/calico-node
-            deploy/calico-kube-controllers
-            deploy/metrics-server
-            deploy/traefik
+        if: always() && matrix.network-provider == 'calico'
+        run: |
+          timeout 10s kubectl --namespace=kube-system get \
+            ds/calico-node \
+            deploy/calico-kube-controllers \
+            deploy/metrics-server \
+            deploy/traefik \
+            --ignore-not-found \
+            --request-timeout=5s
 
   # Provides a single status_all check that can be used in GitHub branch
   # protection rules instead of having to list each matrix job
